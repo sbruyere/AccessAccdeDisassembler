@@ -123,6 +123,7 @@ class LocalFunctionImport64Bit:
 @dataclasses.dataclass
 class LocalFunctionImport32Bit:
     function_index: int
+    srp_index: int
 
 
 @dataclasses.dataclass
@@ -136,7 +137,7 @@ class BasicValueImport:
     value: any
 
 
-ImportTypes = NativeFunctionImport | LocalFunctionImport64Bit | BasicValueImport
+ImportTypes = NativeFunctionImport | LocalFunctionImport64Bit | LocalFunctionImport32Bit | BasicValueImport
 
 
 @dataclasses.dataclass
@@ -146,11 +147,11 @@ class VBAModuleInfo:
     function_names: list[str]
 
 
-def try_decode_ascii(byte_string: bytes):
+def try_decode_identifier(byte_string: bytes):
     if not byte_string:
         return ""
     try:
-        return byte_string.decode("ascii")
+        return byte_string.decode(config.PROJECT_ENCODING)
     except Exception:
         return ""
 
@@ -170,8 +171,8 @@ class VBAProject:
         self._module_index_to_module_info: dict[int, VBAModuleInfo] = {}
 
         for i, module in enumerate(self._project_resource.modules):
-            module_name = self._resolve_fixup(module.name, inner_value=True).decode("ascii")
-            function_names = [try_decode_ascii(self._resolve_fixup(function_name_fixup, inner_value=True)) for
+            module_name = self._resolve_fixup(module.name, inner_value=True).decode(config.PROJECT_ENCODING)
+            function_names = [try_decode_identifier(self._resolve_fixup(function_name_fixup, inner_value=True)) for
                               function_name_fixup
                               in
                               module.functions]
@@ -240,7 +241,7 @@ class VBAProject:
 
         self._module_name_to_inner_name = {entry.module_name.data: entry.inner_name.data for entry in
                                            vba_project_module_entries}
-        self._name_manger_strings = [try_decode_ascii(i.unk12) for i in
+        self._name_manger_strings = [try_decode_identifier(i.unk12) for i in
                                      vba_project.stlib.gtloe.unk17.unk5]
 
         self._name_manger_string_base = self._get_symbol_table_base_index()
@@ -260,11 +261,9 @@ class VBAProject:
 
     def _fully_resolve_import(self, function_import: ImportTypes):
         match function_import:
-            case LocalFunctionImport64Bit():
+            case LocalFunctionImport64Bit() | LocalFunctionImport32Bit():
                 _, module_index = self._get_srp_type_and_module_index(function_import.srp_index)
                 return self._module_index_to_module_info[module_index].function_names[function_import.function_index]
-            case LocalFunctionImport32Bit():
-                return self._all_functions[function_import.function_index]
             case NativeFunctionImport():
                 match function_import.function_name_or_ordinal:
                     case int():
@@ -305,7 +304,7 @@ class VBAProject:
                     else function_ordinal)
             case 18:
                 if config.IS_32_BIT_VBA6:
-                    return LocalFunctionImport32Bit(import_resource.resource.resource.unk1)
+                    return LocalFunctionImport32Bit(import_resource.resource.resource.unk1, import_fixup.srp_index)
                 return LocalFunctionImport64Bit(
                     srp_index=import_resource.resource.resource.pointer.srp_index,
                     function_index=import_resource.resource.resource.unk1)

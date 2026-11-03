@@ -6,7 +6,6 @@ import enum
 import time
 import logging
 
-import angr
 import pydantic
 
 import config
@@ -74,6 +73,9 @@ BYTECODE_END_ADDRESS = 0x2100
 
 
 def generate_mapping(emulated_dll: pathlib.Path, output_mapping: pathlib.Path, opcodes: typing.Iterable[Opcode]):
+    # Reading the bundled opcode tables does not require symbolic execution.
+    import angr
+
     project = angr.Project(
         str(emulated_dll),
         auto_load_libs=True)

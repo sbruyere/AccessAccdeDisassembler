@@ -96,6 +96,10 @@ git clone https://github.com/BenKuperstein/AccessAccdeDisassembler
 pip install -r requirements.txt
 ```
 
+The optional `angr` dependency in `requirements-dev.txt` is needed only when
+generating new opcode mappings. Disassembling with the bundled mappings does
+not require it.
+
 ### Running
 
 ```cmd
@@ -105,6 +109,36 @@ python disassemble.py --accde-file-path "path/to/your/file.accde" --output-folde
 - `--accde-file-path` (required): Path to the ACCDE file you want to disassemble.
 - `--output-folder-path` (required): Path to the folder where the disassembled code will be saved.
 - `--vba6` (optional): Include this flag if the ACCDE file uses 32-bit VBA6.
+- `--encoding` (optional): Windows code page used for project identifiers,
+  defaulting to `cp1252`. For projects from other locales, pass the matching
+  Python text codec name, for example `--encoding cp1251`. Binary transforms such
+  as `base64` and `hex`, and text transforms such as `rot_13`, are rejected before
+  opening a database. Listings are saved as UTF-8.
+
+### Tests
+
+With the regular dependencies installed, run the synthetic regression tests:
+
+```cmd
+python -m unittest discover -s tests -v
+```
+
+The tests do not require an ACCDE sample, Access runtime, or `angr`.
+
+The regression suite covers identifier encodings and CLI validation, optional
+dependencies, all five 256-entry secondary tables in the 32-bit opcode reader,
+module-scoped local function imports, and operand boundaries for cleanup,
+loop, member-store and return/exit instructions. Listing tests distinguish
+numeric operands from frame offsets and imports, retain every cleanup offset,
+preserve variable names for single-value cleanup and variant destinations,
+and leave out-of-range import indexes numeric. The applicable 64-bit paths are
+covered as well.
+
+The five corrected 32-bit handler layouts (`NextI4`, `FMemStStr`, `Return`,
+`ExitProcCb`, `ExitProcHresult`) and secondary dispatch-table sizes were also
+checked locally by static inspection of an x86 VBE7 runtime (7.00.1628).
+This is evidence for those specific layouts, not complete support for every
+VBA version. No runtime binary or application sample is included in the tests.
 
 ## Known Issues
 - The project is in an early state, there are probably lots of bugs, if your file fails to be opened by the project,

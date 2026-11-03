@@ -10,6 +10,25 @@ from scripts.parse_opcode_handlers import *
 
 VBA6_MAX_MNEMONIC = 250
 
+# These handlers take a frame offset first, even though the role is not
+# apparent from a common prefix. Keep branch targets and member/import
+# indexes out of this set rather than treating every "Var" name as a frame.
+FRAME_OFFSET_FIRST_OPCODES = {
+    'ImpVar', 'EqvVar', 'XorVar', 'OrVar', 'AndVar',
+    'EqVar', 'EqTextVar', 'NeVar', 'NeTextVar', 'LeVar', 'LeTextVar',
+    'GeVar', 'GeTextVar', 'LtVar', 'LtTextVar', 'GtVar', 'GtTextVar',
+    'LikeVar', 'LikeTextVar', 'AddVar', 'SubVar', 'ModVar', 'IDvVar',
+    'MulVar', 'DivVar', 'NotVar', 'UMiVar', 'PwrVar', 'ConcatVar',
+    'FnAbsVar', 'FnFixVar', 'FnIntVar', 'FnLenVar', 'FnLenBVar',
+    'FnInStrB4Var', 'FnInStr4Var', 'FnStrComp3Var',
+    'CVecVar', 'CStrVarVal', 'Ary1LdRfVarg', 'PopTmpLdAdVar',
+    'LateMemLdVar', 'LateIdLdVar', 'LateMemCallLdVar', 'LateIdCallLdVar',
+    'ForVar', 'ForStepVar', 'ForEachCollVar', 'NextEachCollVar',
+    'ForEachAryVar', 'NextEachAryVar', 'ForEachVar', 'ForEachVarFree', 'NextEachVar',
+    'FDupVar', 'VarIndexLdVar', 'VarIndexLdRfVar', 'VarIndexLdRfVarLock', 'IStVarCopyObj',
+    'VarLateMemLdRfVar', 'VarLateMemCallLdRfVar', 'VarLateMemLdVar', 'VarLateMemCallLdVar',
+}
+
 
 def add_custom_opcodes(original_opcodes: typing.List[parse_opcode_handlers.Opcode]):
     opcode_mapping = {opcode.name: opcode for opcode in original_opcodes}
@@ -79,6 +98,20 @@ def add_custom_opcodes(original_opcodes: typing.List[parse_opcode_handlers.Opcod
                 # Further analysis may be needed to confirm additional arguments
             )
     if config.IS_32_BIT_VBA6:
+        # The 32-bit handlers consume two words, not the overlapping byte
+        # reads inferred by the mapping generator.
+        for name in ['NextI4', 'FMemStStr']:
+            opcode_mapping[name].args = [OpcodeArg(offset=0, size=2),
+                                         OpcodeArg(offset=2, size=2),
+                                         OpcodeArg(offset=100, size=0)]
+            opcode_mapping[name].init = True
+        # Return/exit handlers restore or replace the bytecode pointer.
+        # Their stack/control reads are not additional inline operands.
+        for name in ['Return', 'ExitProcHresult']:
+            opcode_mapping[name].args = [OpcodeArg(offset=100, size=0)]
+            opcode_mapping[name].init = True
+        opcode_mapping['ExitProcCb'].args = [OpcodeArg(offset=0, size=2), OpcodeArg(offset=100, size=0)]
+        opcode_mapping['ExitProcCb'].init = True
         opcode_mapping["Bos"] = Opcode(
             mnemonics=opcode_mapping["Bos"].mnemonics,
             name="Bos",
@@ -102,7 +135,8 @@ def add_custom_opcodes(original_opcodes: typing.List[parse_opcode_handlers.Opcod
             name=name,
             handler_address=opcode_mapping[name].handler_address,
             args=[OpcodeArg(offset=0, size=2),
-                  VariableSizeOpcodeArg(offset=2, index_of_size=0, op_on_size=lambda x: (4, x / 2)),
+                  VariableSizeOpcodeArg(offset=2, index_of_size=0,
+                                        op_on_size=lambda x: (2 if config.IS_32_BIT_VBA6 else 4, x // 2)),
                   OpcodeArg(offset=100, size=0)],
             init=True,
             # Further analysis may be needed to confirm additional arguments
@@ -125,15 +159,23 @@ def add_custom_opcodes(original_opcodes: typing.List[parse_opcode_handlers.Opcod
             opcode.args = sorted(opcode.args, key=lambda i: i.offset)[:-1]
 
     for opcode_name, opcode in opcode_mapping.items():
+        # The bundled 32-bit mapping labels all operands as frame addresses.
+        # Start with numeric operands; resolve only roles known below.
+        for arg in opcode.args:
+            arg.type = OpcodeArgType.OTHER
         if "AdCall" in opcode_name:
             opcode.args[0].type = OpcodeArgType.IMPORT_INDEX
         if "LitVarStr" in opcode_name:
             opcode.args[1].type = OpcodeArgType.IMPORT_INDEX
         if "LitStr" in opcode_name:
             opcode.args[0].type = OpcodeArgType.IMPORT_INDEX
-        if len([i for i in ("Var", "FLd", "FSt") if i in opcode_name]):
+        if (opcode_name.startswith(('FLd', 'FSt', 'FMem', 'CVar', 'LitVar', 'FFree1')) or
+                opcode_name in FRAME_OFFSET_FIRST_OPCODES):
             if len(opcode.args) > 0:
                 opcode.args[0].type = OpcodeArgType.VAR_ADDRESS
+        if opcode_name in ('FFreeVar', 'FFreeStr', 'FFreeAd'):
+            # The first operand is a count; only the following offsets are addresses.
+            opcode.args[1].type = OpcodeArgType.VAR_ADDRESS
 
     return opcode_mapping.values()
 
@@ -169,7 +211,9 @@ class Disassembler:
         if opcode_mnemonic <= VBA6_MAX_MNEMONIC:
             return opcode_mnemonic
         second_opcode_mnemonic = read_num(bytecode, 1)
-        return ((opcode_mnemonic - VBA6_MAX_MNEMONIC) * 0xff) + second_opcode_mnemonic
+        # Primary entries 0..250 precede five secondary tables of 256 entries.
+        return (VBA6_MAX_MNEMONIC + 1 +
+                (opcode_mnemonic - VBA6_MAX_MNEMONIC - 1) * 0x100 + second_opcode_mnemonic)
 
     @classmethod
     def _read_next_opcode_vba7(cls, bytecode: io.BytesIO) -> int:
@@ -215,20 +259,26 @@ class Disassembler:
             try:
                 opcode = self._read_next_opcode(bytecode)
                 parsed_args = []
-                for arg_raw_value, arg in zip(opcode.args_raw, opcode.opcode.args):
-                    match arg.type:
-                        case OpcodeArgType.IMPORT_INDEX:
-                            if 0 <= arg_raw_value <= len(vba_module.imports):
-                                parsed_args.append(f"{vba_module.imports[arg_raw_value]}<{hex(arg_raw_value)}>")
-                            else:
+                raw_args = iter(opcode.args_raw)
+                for arg in opcode.opcode.args:
+                    count = 1
+                    if isinstance(arg, VariableSizeOpcodeArg):
+                        _, count = arg.op_on_size(opcode.args_raw[arg.index_of_size])
+                    for _ in range(int(count)):
+                        arg_raw_value = next(raw_args)
+                        match arg.type:
+                            case OpcodeArgType.IMPORT_INDEX:
+                                if 0 <= arg_raw_value < len(vba_module.imports):
+                                    parsed_args.append(f"{vba_module.imports[arg_raw_value]}<{hex(arg_raw_value)}>")
+                                else:
+                                    parsed_args.append(hex(arg_raw_value))
+                            case OpcodeArgType.VAR_ADDRESS:
+                                if arg_raw_value in address_to_var_name:
+                                    parsed_args.append(address_to_var_name[arg_raw_value])
+                                else:
+                                    parsed_args.append(hex(arg_raw_value))
+                            case _:
                                 parsed_args.append(hex(arg_raw_value))
-                        case OpcodeArgType.VAR_ADDRESS:
-                            if arg_raw_value in address_to_var_name:
-                                parsed_args.append(address_to_var_name[arg_raw_value])
-                            else:
-                                parsed_args.append(hex(arg_raw_value))
-                        case _:
-                            parsed_args.append(hex(arg_raw_value))
 
                 disassembly.append(
                     f"{hex(opcode_index)}: {opcode.opcode.name}({','.join([i for i in parsed_args])}) [{hex(opcode.mnemonic)}]")
